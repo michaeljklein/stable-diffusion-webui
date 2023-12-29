@@ -145,7 +145,7 @@ def sample_dpmpp_2m_hyperbatch(model, x, sigmas, extra_args=None, callback=None,
     old_denoised = None
 
     for i in tqdm.auto.trange(len(sigmas) - 1, disable=disable):
-        if i != 0 and i % sub_step_size == 0:
+        if (i + 1) % sub_step_size == 0:
             if i == sub_step_final:
                 appended_size = batch_size_leftover
             else:
@@ -260,7 +260,7 @@ def sample_dpmpp_sde_hyperbatch(model, x, sigmas, extra_args=None, callback=None
     t_fn = lambda sigma: sigma.log().neg()
 
     for i in tqdm.trange(len(sigmas) - 1, disable=disable):
-        if i != 0 and i % sub_step_size == 0:
+        if (i + 1) % sub_step_size == 0:
             if i == sub_step_final:
                 appended_size = batch_size_leftover
             else:
