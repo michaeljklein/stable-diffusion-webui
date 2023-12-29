@@ -36,6 +36,9 @@ samplers_k_diffusion = [
     ('DPM2 a Karras', 'sample_dpm_2_ancestral', ['k_dpm_2_a_ka'], {'scheduler': 'karras', 'discard_next_to_last_sigma': True, "uses_ensd": True, "second_order": True}),
     ('DPM++ 2S a Karras', 'sample_dpmpp_2s_ancestral', ['k_dpmpp_2s_a_ka'], {'scheduler': 'karras', "uses_ensd": True, "second_order": True}),
     ('Restart', sd_samplers_extra.restart_sampler, ['restart'], {'scheduler': 'karras', "second_order": True}),
+    ('DPM++ 2M Karras - Hyperbatch', sd_samplers_extra.sample_dpmpp_2m_hyperbatch, ['k_dpmpp_2m_ka_hyperbatch'], {'scheduler': 'karras'}),
+    ('DPM++ SDE Karras - Hyperbatch', sd_samplers_extra.sample_dpmpp_sde_hyperbatch, ['k_dpmpp_sde_ka_hyperbatch'], {'scheduler': 'karras', "second_order": True, "brownian_noise": True}),
+    ('DPM++ SDE - Hyperbatch', sd_samplers_extra.sample_dpmpp_sde_hyperbatch, ['k_dpmpp_sde_hyperbatch'], {"second_order": True, "brownian_noise": True}),
 ]
 
 
@@ -55,6 +58,7 @@ sampler_extra_params = {
     'sample_dpmpp_sde': ['s_noise'],
     'sample_dpmpp_2m_sde': ['s_noise'],
     'sample_dpmpp_3m_sde': ['s_noise'],
+    sd_samplers_extra.sample_dpmpp_sde_hyperbatch: ['s_noise'],
 }
 
 k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
