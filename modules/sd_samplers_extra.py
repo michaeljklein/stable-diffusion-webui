@@ -74,6 +74,73 @@ def restart_sampler(model, x, sigmas, extra_args=None, callback=None, disable=No
     return x
 
 
+def batch_doubling_schedule_validate_and_final_size(schedule):
+    current_index = 0
+    current_size = 1
+    for expected_current_size, appended_size, i in schedule:
+        assert current_index == i, f"current_index has unexpected value: {current_index} != {i}"
+        current_index += 1
+        if appended_size is None:
+            current_size *= 2
+        else:
+            current_size += appended_size
+        assert expected_current_size == current_size, f"expected_current_size != current_size: {expected_current_size} != {current_size}"
+
+    return current_size
+
+# The doubling pattern has shape:
+#
+# d steps, 2x, d steps, 2x, .., 2x, d steps, leftover/2x, d steps
+#
+# K 2x’s/leftovers
+# K*d + d = (K+1)*d = steps
+# steps/(K + 1) = d
+# zs = [0] * d
+#
+# If leftovers
+#   (zs + [None]) * (K-1) + zs + leftovers + zs
+# Else
+#   (zs + [None]) * K + zs
+#
+# Note: this function asserts that the schedule:
+# - is an Iterator[tuple[current_size, appended_size | None, int]]
+# - list(map(lambda x: x[-1], schedule)) == list(range(num_steps))
+# - map(lambda x: x[1], output) == range(num_steps)
+# - the batch_size's increase as expected
+def batch_doubling_schedule(batch_size, num_steps, disable_tqdm=True):
+    batch_size_log2 = batch_size.bit_length()
+    batch_size_leftover = None
+    if 2 ** batch_size_log2 != batch_size:
+        batch_size_log2 -= 1
+        batch_size_leftover = batch_size - 2 ** batch_size_log2
+
+    if num_steps <= batch_size_log2:
+        print(f"The number of steps must be greater than log2(batch_size) to use a Hyperbatch scheduler: disabling Hyperbatch functionality.")
+        schedule = list(map(lambda i: (batch_size, 0, i), range(num_steps)))
+        assert len(schedule) == num_steps, f"len(schedule) != num_steps: {len(schedule)} != {num_steps}: {batch_size_log2} {schedule}"
+        return schedule
+
+    substep_length = num_steps // (batch_size_log2 + 1)
+    substeps = [0] * (substep_length - 1)
+    schedule = (substeps + [None]) * batch_size_log2 + substeps + [batch_size_leftover]
+    schedule += [0] * (num_steps - len(schedule))
+    current_batch_size = 1
+    def add_current_batch_size(i_appended_size):
+        nonlocal current_batch_size
+        i, appended_size = i_appended_size
+        if appended_size is None:
+            current_batch_size *= 2
+        else:
+            current_batch_size += appended_size
+        return (current_batch_size, appended_size, i)
+
+    schedule = list(tqdm.contrib.tmap(add_current_batch_size, enumerate(schedule), disable=disable_tqdm))
+    final_size = batch_doubling_schedule_validate_and_final_size(schedule)
+    assert batch_size == final_size, f"batch_size not equal to current_size: {batch_size} != {final_size} \n {schedule}"
+    assert len(schedule) == num_steps, f"len(schedule) != num_steps: {len(schedule)} != {num_steps}: {schedule}"
+    return schedule
+
+
 @torch.no_grad()
 def sample_dpmpp_2m_hyperbatch(model, x, sigmas, extra_args=None, callback=None, disable=None):
     """DPM-Solver++(2M) - Hyperbatch.
@@ -105,24 +172,7 @@ def sample_dpmpp_2m_hyperbatch(model, x, sigmas, extra_args=None, callback=None,
     # BEGIN PATCH
     batch_size = x.size(dim=0)
     x = x[0:1]
-    current_batch_size = x.size(dim=0)
-    # TODO: remove assert
-    assert current_batch_size == 1
     num_steps = len(sigmas)
-    current_batch_size_log2 = 0
-    batch_size_log2 = batch_size.bit_length()
-    batch_size_leftover = 0
-    if 2 ** batch_size_log2 != batch_size:
-        batch_size_log2 -= 1
-        batch_size_leftover = batch_size - 2 ** batch_size_log2
-
-    # number of steps between doubling
-    num_sub_steps = batch_size_log2 + 1
-    sub_step_size = num_steps // num_sub_steps
-    if num_steps % num_sub_steps:
-        sub_step_final = sub_step_size * num_sub_steps
-    else:
-        sub_step_final = sub_step_size * batch_size_log2
 
     # MulticondLearnedConditioning
     if 'cond' in extra_args:
@@ -144,18 +194,12 @@ def sample_dpmpp_2m_hyperbatch(model, x, sigmas, extra_args=None, callback=None,
     t_fn = lambda sigma: sigma.log().neg()
     old_denoised = None
 
-    for i in tqdm.auto.trange(len(sigmas) - 1, disable=disable):
-        if (i + 1) % sub_step_size == 0:
-            if i == sub_step_final:
-                appended_size = batch_size_leftover
-            else:
-                appended_size = None
-
-            current_batch_size_log2 += 1
+    for current_batch_size, appended_size, i in batch_doubling_schedule(batch_size, num_steps - 1, disable_tqdm=disable):
+        if appended_size != 0:
             x = torch.cat([x, x[0:appended_size]], dim=0)
             s_in = x.new_ones([x.shape[0]])
             old_denoised = torch.cat([old_denoised, old_denoised[0:appended_size]], dim=0)
-            current_batch_size = x.size(dim=0)
+            assert current_batch_size == x.size(dim=0)
 
             # MulticondLearnedConditioning
             if 'cond' in extra_args:
@@ -221,24 +265,7 @@ def sample_dpmpp_sde_hyperbatch(model, x, sigmas, extra_args=None, callback=None
     # BEGIN PATCH
     batch_size = x.size(dim=0)
     x = x[0:1]
-    current_batch_size = x.size(dim=0)
-    # TODO: remove assert
-    assert current_batch_size == 1
     num_steps = len(sigmas)
-    current_batch_size_log2 = 0
-    batch_size_log2 = batch_size.bit_length()
-    batch_size_leftover = 0
-    if 2 ** batch_size_log2 != batch_size:
-        batch_size_log2 -= 1
-        batch_size_leftover = batch_size - 2 ** batch_size_log2
-
-    # number of steps between doubling
-    num_sub_steps = batch_size_log2 + 1
-    sub_step_size = num_steps // num_sub_steps
-    if num_steps % num_sub_steps:
-        sub_step_final = sub_step_size * num_sub_steps
-    else:
-        sub_step_final = sub_step_size * batch_size_log2
 
     # MulticondLearnedConditioning
     if 'cond' in extra_args:
@@ -259,17 +286,11 @@ def sample_dpmpp_sde_hyperbatch(model, x, sigmas, extra_args=None, callback=None
     sigma_fn = lambda t: t.neg().exp()
     t_fn = lambda sigma: sigma.log().neg()
 
-    for i in tqdm.trange(len(sigmas) - 1, disable=disable):
-        if (i + 1) % sub_step_size == 0:
-            if i == sub_step_final:
-                appended_size = batch_size_leftover
-            else:
-                appended_size = None
-
-            current_batch_size_log2 += 1
+    for current_batch_size, appended_size, i in batch_doubling_schedule(batch_size, num_steps - 1, disable_tqdm=disable):
+        if appended_size != 0:
             x = torch.cat([x, x[0:appended_size]], dim=0)
             s_in = x.new_ones([x.shape[0]])
-            current_batch_size = x.size(dim=0)
+            assert current_batch_size == x.size(dim=0)
 
             # MulticondLearnedConditioning
             if 'cond' in extra_args:
